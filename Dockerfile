@@ -23,7 +23,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # ---- tweakables ----
 ARG SIGNAL_REPO=https://github.com/signalapp/Signal-Desktop.git
 ARG SIGNAL_REF=main                 # overridden by build script if needed
-ARG LINUX_TARGETS=appimage          # e.g. appImage deb rpm
+ARG LINUX_TARGETS=AppImage          # e.g. appImage deb rpm
 ARG PNPM_VERSION=10.6.4
 ARG ELECTRON_BUILDER_VERSION=24     # pin for reproducible packaging
 ARG USER_NAME=node                  # not used for build here, but tweakable
@@ -67,9 +67,16 @@ RUN pnpm run transpile || true
 
 # Build packages with electron-builder (targets set via ARG)
 ENV SIGNAL_ENV=production
+
 # Use pinned electron-builder; disable publishing so GH_TOKEN isn't required
+# RUN ELECTRON_BUILDER_PUBLISH=never CI=false \
+#    npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux "${LINUX_TARGETS}" --publish=never
 RUN ELECTRON_BUILDER_PUBLISH=never CI=false \
-    npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux "${LINUX_TARGETS}" --publish=never
+    pnpm exec electron-builder --linux "${LINUX_TARGETS}" --publish=never \
+    || ELECTRON_BUILDER_PUBLISH=never CI=false \
+    ./node_modules/.bin/electron-builder --linux "${LINUX_TARGETS}" --publish=never \
+    || ELECTRON_BUILDER_PUBLISH=never CI=false \
+    npx --yes electron-builder@23 --linux "${LINUX_TARGETS}" --publish=never
 
 # -------- exporter (artifacts with chosen ownership) --------
 FROM debian:13-slim AS exporter
