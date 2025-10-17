@@ -24,7 +24,7 @@ IMAGE_NAME="signal-desktop-builder"
 CONTAINER_NAME="signal-desktop-out"
 OUTPUT_DIR="${OUTPUT_DIR:-./out}"
 # You can override these on the docker build command with --build-arg
-SIGNAL_REF="${SIGNAL_REF:-v7.69.0}"
+SIGNAL_REF="${SIGNAL_REF:-v7.75.1}"
 LINUX_TARGETS="${LINUX_TARGETS:-appImage}"
 PNPM_VERSION="${PNPM_VERSION:-10.6.4}"
 ARTIFACT_UID="${ARTIFACT_UID:-1000}"
@@ -32,19 +32,21 @@ ARTIFACT_GID="${ARTIFACT_GID:-1000}"
 
 echo "[*] Building image (Signal ref: ${SIGNAL_REF}, targets: ${LINUX_TARGETS})..."
 docker build --no-cache -t "${IMAGE_NAME}" \
-  --build-arg SIGNAL_REF="${SIGNAL_REF}" \
-  --build-arg LINUX_TARGETS="${LINUX_TARGETS}" \
-  --build-arg PNPM_VERSION="${PNPM_VERSION}" \
-  --build-arg ARTIFACT_UID="${ARTIFACT_UID}" \
-  --build-arg ARTIFACT_GID="${ARTIFACT_GID}" \
-  .
+    --build-arg SIGNAL_REF="${SIGNAL_REF}" \
+    --build-arg LINUX_TARGETS="${LINUX_TARGETS}" \
+    --build-arg PNPM_VERSION="${PNPM_VERSION}" \
+    --build-arg ARTIFACT_UID="${ARTIFACT_UID}" \
+    --build-arg ARTIFACT_GID="${ARTIFACT_GID}" \
+    .
 
 echo "[*] Exporting artifacts..."
 rm -rf "${OUTPUT_DIR}"
+umask 022
 mkdir -p "${OUTPUT_DIR}"
 cid="$(docker create --name "${CONTAINER_NAME}" "${IMAGE_NAME}")"
 trap 'docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true' EXIT
-docker cp "${cid}:/out/." "${OUTPUT_DIR}/"
+docker cp "${cid}:/out/." - |
+    tar --extract --no-same-owner --no-same-permissions --directory "${OUTPUT_DIR}"
 docker rm -f "${CONTAINER_NAME}" >/dev/null
 trap - EXIT
 
