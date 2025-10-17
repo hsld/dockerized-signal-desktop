@@ -1,96 +1,111 @@
-dockerized-signal-desktop
+# dockerized-signal-desktop
 
-Build Signal Desktop Linux packages (AppImage/DEB/RPM) inside a clean Docker environment using pnpm
-via Corepack. The host system stays untouched --- only the final artifacts are copied out.
+Build Signal Desktop for Linux (AppImage, DEB, or RPM) inside a clean Docker environment.  
+The build runs entirely in a container and only the finished artifacts are copied to your host system.
 
-Features
+## Features
 
-Node 22 (Debian 13 / Trixie) base image with a modern, reproducible toolchain
+- Debian 13 (Trixie) base image with modern Node 22 toolchain  
+- Uses pnpm via Corepack with a pinned version for reproducibility  
+- Supports multiple Linux targets via the `LINUX_TARGETS` build argument  
+  (for example: `appImage`, `deb`, `rpm`, or `deb,rpm,appImage`)  
+- Uses a pinned version of `electron-builder` to ensure consistent builds  
+- Includes a helper build script (`build_signal-desktop.sh`) that:  
+  - Finds the latest Signal Desktop release automatically  
+  - Builds the image with Docker BuildKit  
+  - Exports the resulting artifacts to `./out`
 
-pnpm via Corepack, pinned and activated safely during build
+## Requirements
 
-Electron Builder pinned to v24 for reproducible packaging
+- Docker installed and accessible by your user  
+- Internet access for fetching the Signal source and dependencies  
 
-Supports multiple Linux targets via LINUX_TARGETS (appimage, deb, rpm, or comma-separated
-combinations)
+## Quick Start (manual Docker commands)
 
-Automatic tag detection from the Signal repository using the GitHub API or refs as fallback
+Build a specific version of Signal Desktop:
 
-Robust build script (build_signal-desktop.sh) for one-command builds, cleanup, and artifact export
+```bash
+docker build --pull \
+  --build-arg SIGNAL_REF=v7.75.1 \
+  -t signal-desktop-builder .
+```
 
-Uses Docker BuildKit for improved caching, performance, and cleaner builds
+Run the build:
 
-Consistent permissions and ownership handling via umask 022 and tar-based extraction
+```bash
+docker run --rm \
+  -e LINUX_TARGETS="appimage" \
+  -e GH_TOKEN=skip \
+  --name signal-temp \
+  signal-desktop-builder
+```
 
-Prerequisites
+Copy artifacts from the container:
 
-Docker (BuildKit recommended)
-
-Quick start (Docker CLI)
-
-Build the image (latest stable tag automatically detected, or specify one)
-
-docker build --pull\ --build-arg SIGNAL_REF=v7.75.1\ -t signal-desktop-builder .
-
-Run the builder (choose targets: appimage \| deb \| rpm \| combinations)
-
-docker run --rm\ -e LINUX_TARGETS="appimage"\ -e GH_TOKEN=skip\ --name signal-temp\ signal-desktop-
-builder
-
-Copy artifacts to host
-
-CID="$(docker create signal-desktop-builder)" mkdir -p out docker cp "$CID:/opt/Signal-
-Desktop/dist/." ./out/ docker rm -f "\$CID" \>/dev/null
-
+```bash
+CID=$(docker create signal-desktop-builder)
+mkdir -p out
+docker cp "$CID:/out/." ./out/
+docker rm -f "$CID" >/dev/null
 ls -lh out
+```
 
-Quick start (build script)
+## Quick Start (wrapper script)
 
-The helper script provides automatic tag detection, logging, and cleanup. It can build from any tag,
-branch, or ref without modifying the Dockerfile.
+The included build script automates the entire process.
 
-Default: build latest stable release (AppImage)
+Default build (latest stable tag, AppImage target):
 
+```bash
 ./build_signal-desktop.sh
+```
 
-Build specific targets
+Build specific targets:
 
+```bash
 LINUX_TARGETS="deb,rpm" ./build_signal-desktop.sh
+```
 
-Build from a custom ref or branch
+Build from a custom branch or repository:
 
-SIGNAL_REF="v7.75.1" LINUX_TARGETS="appimage" ./build_signal-desktop.sh
+```bash
+SIGNAL_REF=main LINUX_TARGETS="appimage" ./build_signal-desktop.sh
+```
 
-What it does
+What it does:
 
-Automatically determines the latest stable release via GitHub API or git tags
+- Determines the latest Signal release automatically (via GitHub API)  
+- Builds a Docker image using the included Dockerfile  
+- Runs the containerized build  
+- Copies resulting artifacts to `./out`  
+- Cleans up temporary containers and images  
 
-Builds the Docker image using Debian 13 (Trixie)
+## Configuration
 
-Runs electron-builder@24 inside the container for your selected targets
+You can override these environment variables:
 
-Copies /out/ to the host (default ./out)
+- `LINUX_TARGETS` — Build targets (`appimage`, `deb`, `rpm`)  
+- `SIGNAL_REF` — Git tag, branch, or commit to build  
+- `PNPM_VERSION` — Version of pnpm to use  
+- `ARTIFACT_UID` / `ARTIFACT_GID` — Ownership of exported files  
+- `NO_CACHE` — Set to 0 to allow Docker cache reuse  
+- `PROGRESS` — Build output mode (`auto`, `plain`)  
 
-Cleans up temporary containers and images automatically
+## Troubleshooting
 
-Configuration Variable Description Default SIGNAL_REF Git ref or tag to build latest release (auto)
-LINUX_TARGETS Comma-separated list of build targets appImage PNPM_VERSION Version of pnpm to
-activate via Corepack 10.6.4 ELECTRON_BUILDER_VERSION Electron Builder version 24 ARTIFACT_UID /
-ARTIFACT_GID UID/GID ownership for exported files 1000 OUT_DIR Destination directory for exported
-artifacts ./out NO_CACHE Disable Docker layer cache 1 PROGRESS Docker build output format auto
-Troubleshooting
+If you see permission denied errors:  
+- Ensure your user is part of the docker group  
+- Run `newgrp docker` after adding yourself to the group  
+- Rebuild with `sudo` only as a last resort  
 
-Permission denied during export: fixed by the export mechanism --- files are copied using tar with
-normalized ownership.
+If the build fails on the pnpm or Corepack step:  
+- Check Docker network connectivity  
+- Try rebuilding with `--no-cache`  
 
-Corepack issues: the build uses corepack enable as root. In restricted environments, ensure
-/usr/local/bin is writable.
+If electron-builder warns about publishing:  
+- Pass `GH_TOKEN=skip` to disable all release uploads  
 
-Tag detection fails: the script falls back to git refs if the GitHub API is unavailable.
+## License and Credits
 
-Build stuck or slow: ensure BuildKit is enabled (export DOCKER_BUILDKIT=1).
-
-License & Credits
-
-This repository provides a Dockerized build environment for Signal Desktop. All code, trademarks,
-and licenses for Signal belong to their respective owners.
+This project provides only the Docker-based build environment.  
+Signal Desktop and all associated code, licenses, and trademarks belong to Signal Messenger LLC.
