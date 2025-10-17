@@ -29,22 +29,22 @@ ARG PNPM_VERSION=10.6.4
 
 # Helpful non-interactive defaults
 ENV CI=1 \
-    npm_config_fund=false \
-    npm_config_audit=false
+  npm_config_fund=false \
+  npm_config_audit=false
 
 # System dependencies for build + packaging
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git git-lfs curl wget gnupg build-essential python3 python3-pip \
-    libx11-dev libxkbfile-dev libsecret-1-dev \
-    libgtk-3-dev libnss3 libasound2 libxss1 libxtst6 libnotify4 libx11-xcb1 \
-    libgbm-dev squashfs-tools xz-utils rpm zsync \
-    && rm -rf /var/lib/apt/lists/* \
-    && git lfs install --system
+  git git-lfs curl wget gnupg build-essential python3 python3-pip \
+  libx11-dev libxkbfile-dev libsecret-1-dev \
+  libgtk-3-dev libnss3 libasound2 libxss1 libxtst6 libnotify4 libx11-xcb1 \
+  libgbm-dev squashfs-tools xz-utils rpm zsync \
+  && rm -rf /var/lib/apt/lists/* \
+  && git lfs install --system
 
 # Enable pnpm globally via Corepack *while root* (so /usr/local/bin shims can be written)
 RUN corepack enable \
-    && corepack prepare pnpm@${PNPM_VERSION} --activate \
-    && pnpm --version
+  && corepack prepare pnpm@${PNPM_VERSION} --activate \
+  && pnpm --version
 
 WORKDIR /opt
 
@@ -64,7 +64,7 @@ RUN pnpm run transpile || true
 ENV SIGNAL_ENV=production
 # Explicitly disable publishing so GH_TOKEN isn't required
 RUN ELECTRON_BUILDER_PUBLISH=never CI=false \
-    ./node_modules/.bin/electron-builder --linux "${LINUX_TARGETS}" --publish=never
+  ./node_modules/.bin/electron-builder --linux "${LINUX_TARGETS}" --publish=never
 
 FROM debian:12-slim AS exporter
 SHELL ["/bin/bash","-o","pipefail","-lc"]
