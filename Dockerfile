@@ -16,35 +16,40 @@
 #
 # Contact: https://github.com/hsld/dockerized-signal-desktop/issues
 
-FROM node:22-bookworm AS builder
+FROM node:22-trixie AS builder
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ---- tweakables ----
 ARG SIGNAL_REPO=https://github.com/signalapp/Signal-Desktop.git
-# Default can be overridden by the build script which picks the latest tag.
-ARG SIGNAL_REF=main
-ARG LINUX_TARGETS=appimage
+ARG SIGNAL_REF=main                 # overridden by build script if needed
+ARG LINUX_TARGETS=appimage          # e.g. appImage deb rpm
 ARG PNPM_VERSION=10.6.4
+ARG ELECTRON_BUILDER_VERSION=24     # pin for reproducible packaging
+ARG USER_NAME=node                  # not used for build here, but tweakable
+ARG UID=1000
+ARG GID=1000
 
 # Helpful non-interactive defaults
 ENV CI=1 \
-  npm_config_fund=false \
-  npm_config_audit=false
+    npm_config_fund=false \
+    npm_config_audit=false \
+    HUSKY=0 \
+    NODE_OPTIONS=--max_old_space_size=4096
 
 # System dependencies for build + packaging
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  git git-lfs curl wget gnupg build-essential python3 python3-pip \
-  libx11-dev libxkbfile-dev libsecret-1-dev \
-  libgtk-3-dev libnss3 libasound2 libxss1 libxtst6 libnotify4 libx11-xcb1 \
-  libgbm-dev squashfs-tools xz-utils rpm zsync \
-  && rm -rf /var/lib/apt/lists/* \
-  && git lfs install --system
+    git git-lfs curl wget gnupg build-essential python3 python3-pip \
+    libx11-dev libxkbfile-dev libsecret-1-dev \
+    libgtk-3-dev libnss3 libasound2 libxss1 libxtst6 libnotify4 libx11-xcb1 \
+    libgbm-dev squashfs-tools xz-utils rpm zsync \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install --system
 
 # Enable pnpm globally via Corepack *while root* (so /usr/local/bin shims can be written)
 RUN corepack enable \
-  && corepack prepare pnpm@${PNPM_VERSION} --activate \
-  && pnpm --version
+    && corepack prepare pnpm@${PNPM_VERSION} --activate \
+    && pnpm --version
 
 WORKDIR /opt
 
@@ -62,17 +67,22 @@ RUN pnpm run transpile || true
 
 # Build packages with electron-builder (targets set via ARG)
 ENV SIGNAL_ENV=production
-# Explicitly disable publishing so GH_TOKEN isn't required
+# Use pinned electron-builder; disable publishing so GH_TOKEN isn't required
 RUN ELECTRON_BUILDER_PUBLISH=never CI=false \
-  ./node_modules/.bin/electron-builder --linux "${LINUX_TARGETS}" --publish=never
+    npx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux "${LINUX_TARGETS}" --publish=never
 
-FROM debian:12-slim AS exporter
+# -------- exporter (artifacts with chosen ownership) --------
+FROM debian:13-slim AS exporter
 SHELL ["/bin/bash","-o","pipefail","-lc"]
+
+# ---- tweakables (export ownership) ----
 ARG ARTIFACT_UID=1000
 ARG ARTIFACT_GID=1000
+ARG OUT_DIR=/out
+
 RUN groupadd -g ${ARTIFACT_GID} app && useradd -l -m -u ${ARTIFACT_UID} -g ${ARTIFACT_GID} app
 USER app
-WORKDIR /out
+WORKDIR ${OUT_DIR}
 
 # Copy built artifacts out of the image
-COPY --from=builder --chown=app:app /opt/Signal-Desktop/dist/ /out/
+COPY --from=builder --chown=app:app /opt/Signal-Desktop/dist/ ${OUT_DIR}/
