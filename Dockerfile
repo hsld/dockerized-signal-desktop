@@ -20,7 +20,7 @@ FROM node:22-trixie AS builder
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 ARG DEBIAN_FRONTEND=noninteractive
 
-# ---- tweakables ----
+# tweakables
 ARG SIGNAL_REPO=https://github.com/signalapp/Signal-Desktop.git
 ARG SIGNAL_REF=main
 ARG LINUX_TARGETS=AppImage
@@ -29,7 +29,7 @@ ARG ELECTRON_BUILDER_VERSION=24.13.3
 ARG UID=1000
 ARG GID=1000
 
-# Helpful non-interactive defaults
+# helpful non-interactive defaults
 ENV CI=1 \
     HUSKY=0 \
     NODE_OPTIONS=--max_old_space_size=4096 \
@@ -39,7 +39,7 @@ ENV CI=1 \
     COREPACK_ENABLE_AUTO_PIN=0 \
     USE_HARD_LINKS=false
 
-# System dependencies for build + packaging
+# system dependencies for build and packaging
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -50,13 +50,13 @@ RUN set -euo pipefail; \
     rm -rf /var/lib/apt/lists/*; \
     git lfs install --system
 
-# Enable pnpm via Corepack (deterministic)
+# enable pnpm via Corepack (deterministic)
 RUN set -euo pipefail; \
     corepack enable; \
     corepack prepare "pnpm@${PNPM_VERSION}" --activate; \
     pnpm --version
 
-# Build as non-root (avoids root-owned node_modules and cache weirdness)
+# build as non-root (avoids root-owned node_modules and cache weirdness)
 RUN set -euo pipefail; \
     groupmod -g "${GID}" node; \
     usermod  -u "${UID}" -g "${GID}" node; \
@@ -65,22 +65,22 @@ RUN set -euo pipefail; \
 USER node
 WORKDIR /opt
 
-# Clone pinned ref
+# clone pinned ref
 RUN set -euo pipefail; \
     git clone --depth=1 --branch "${SIGNAL_REF}" "${SIGNAL_REPO}" Signal-Desktop
 WORKDIR /opt/Signal-Desktop
 
-# Install deps (fail if lockfile mismatch; remove the fallback for reproducibility)
+# install deps (fail if lockfile mismatch; remove the fallback for reproducibility)
 RUN set -euo pipefail; \
     pnpm install --frozen-lockfile
 
-# Optional pre-steps (run only if the script exists; do not mask failures)
+# optional pre-steps (run only if the script exists; do not mask failures)
 RUN set -euo pipefail; \
     node -e 'const p=require("./package.json");process.exit(p.scripts?.build?0:1)' && pnpm run build || true
 RUN set -euo pipefail; \
     node -e 'const p=require("./package.json");process.exit(p.scripts?.transpile?0:1)' && pnpm run transpile || true
 
-# Package (prefer repo's electron-builder; if missing, use a pinned dlx fallback)
+# package (prefer repo's electron-builder; if missing, use a pinned dlx fallback)
 ENV SIGNAL_ENV=production \
     ELECTRON_BUILDER_CACHE=/home/node/.cache/electron-builder
 
@@ -92,7 +92,7 @@ RUN set -euo pipefail; \
     ELECTRON_BUILDER_PUBLISH=never CI=false pnpm dlx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux "${LINUX_TARGETS}" --publish=never; \
     fi
 
-# -------- exporter (artifacts with chosen ownership) --------
+# exporter (artifacts with chosen ownership)
 FROM debian:13-slim AS exporter
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 
