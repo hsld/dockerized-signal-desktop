@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # dockerized-signal-desktop
 # Copyright (C) 2025 hsld <62700359+hsld@users.noreply.github.com>
 #
@@ -17,6 +19,7 @@
 # Contact: https://github.com/hsld/dockerized-signal-desktop/issues
 
 FROM node:22-trixie AS builder
+
 SHELL ["/bin/bash","-o","pipefail","-lc"]
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -39,14 +42,18 @@ ENV CI=1 \
     COREPACK_ENABLE_AUTO_PIN=0 \
     USE_HARD_LINKS=false
 
+# helpful cache locations (so BuildKit can mount them)
+ENV PNPM_STORE_PATH=/home/node/.local/share/pnpm/store \
+    ELECTRON_BUILDER_CACHE=/home/node/.cache/electron-builder
+
 # system dependencies for build and packaging
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-    git git-lfs curl wget gnupg build-essential python3 python3-pip \
-    libx11-dev libxkbfile-dev libsecret-1-dev \
-    libgtk-3-dev libnss3 libasound2 libxss1 libxtst6 libnotify4 libx11-xcb1 \
-    libgbm-dev squashfs-tools xz-utils rpm zsync; \
+        git git-lfs curl wget gnupg build-essential python3 python3-pip \
+        libx11-dev libxkbfile-dev libsecret-1-dev \
+        libgtk-3-dev libnss3 libasound2 libxss1 libxtst6 libnotify4 \
+        libx11-xcb1 libgbm-dev squashfs-tools xz-utils rpm zsync; \
     rm -rf /var/lib/apt/lists/*; \
     git lfs install --system
 
@@ -61,49 +68,63 @@ RUN set -euo pipefail; \
     groupmod -g "${GID}" node; \
     usermod  -u "${UID}" -g "${GID}" node; \
     mkdir -p /opt; \
-    chown -R node:node /opt
+    chown -R node:node /opt /home/node
 USER node
 WORKDIR /opt
 
 # clone pinned ref
 RUN set -euo pipefail; \
-    git clone --depth=1 --branch "${SIGNAL_REF}" "${SIGNAL_REPO}" Signal-Desktop
+    git clone --depth=1 --branch "${SIGNAL_REF}" "${SIGNAL_REPO}" \
+        Signal-Desktop
 WORKDIR /opt/Signal-Desktop
 
-# install deps (fail if lockfile mismatch; remove the fallback for reproducibility)
-RUN set -euo pipefail; \
+# install deps (fail if lockfile mismatch; remove fallback for reproducibility)
+# BuildKit improvement: cache the pnpm store between builds.
+# IMPORTANT: cache mounts are root-owned by default; set uid/gid so node can
+# write.
+RUN --mount=type=cache,id=pnpm-store,target=/home/node/.local/share/pnpm/store,\
+uid=${UID},gid=${GID},mode=0775 \
+    set -euo pipefail; \
     pnpm install --frozen-lockfile
 
 # optional pre-steps (run only if the script exists; do not mask failures)
 RUN set -euo pipefail; \
-    node -e 'const p=require("./package.json");process.exit(p.scripts?.build?0:1)' && pnpm run build || true
+    node -e \
+        'const p=require("./package.json");process.exit(p.scripts?.build?0:1)' \
+    && pnpm run build || true
 RUN set -euo pipefail; \
-    node -e 'const p=require("./package.json");process.exit(p.scripts?.transpile?0:1)' && pnpm run transpile || true
+    node -e \
+        'const p=require("./package.json");process.exit(p.scripts?.transpile?0:1)' \
+    && pnpm run transpile || true
 
 # package (prefer repo's electron-builder; if missing, use a pinned dlx fallback)
-ENV SIGNAL_ENV=production \
-    ELECTRON_BUILDER_CACHE=/home/node/.cache/electron-builder
+ENV SIGNAL_ENV=production
 
-RUN set -euo pipefail; \
+# BuildKit improvement: cache electron-builder downloads between builds.
+# IMPORTANT: cache mounts are root-owned by default; set uid/gid so node can
+# write.
+RUN --mount=type=cache,id=electron-builder-cache,\
+target=/home/node/.cache/electron-builder,uid=${UID},gid=${GID},mode=0775 \
+    set -euo pipefail; \
     rm -rf dist; \
     if pnpm exec electron-builder --version >/dev/null 2>&1; then \
-    ELECTRON_BUILDER_PUBLISH=never CI=false pnpm exec electron-builder --linux "${LINUX_TARGETS}" --publish=never; \
+        ELECTRON_BUILDER_PUBLISH=never CI=false \
+            pnpm exec electron-builder \
+                --linux "${LINUX_TARGETS}" --publish=never; \
     else \
-    ELECTRON_BUILDER_PUBLISH=never CI=false pnpm dlx "electron-builder@${ELECTRON_BUILDER_VERSION}" --linux "${LINUX_TARGETS}" --publish=never; \
+        ELECTRON_BUILDER_PUBLISH=never CI=false \
+            pnpm dlx "electron-builder@${ELECTRON_BUILDER_VERSION}" \
+                --linux "${LINUX_TARGETS}" --publish=never; \
     fi
 
-# exporter (artifacts with chosen ownership)
-FROM debian:13-slim AS exporter
-SHELL ["/bin/bash","-o","pipefail","-lc"]
+# exporter (artifacts only)
+FROM scratch AS exporter
 
 ARG ARTIFACT_UID=1000
 ARG ARTIFACT_GID=1000
-ARG OUT_DIR=/out
 
-RUN set -euo pipefail; \
-    groupadd -g "${ARTIFACT_GID}" app; \
-    useradd -l -m -u "${ARTIFACT_UID}" -g "${ARTIFACT_GID}" app
-USER app
-WORKDIR ${OUT_DIR}
-
-COPY --from=builder --chown=app:app /opt/Signal-Desktop/dist/ ${OUT_DIR}/
+# copy only AppImage artifacts (and common companions when present)
+COPY --from=builder --chown=${ARTIFACT_UID}:${ARTIFACT_GID} \
+    /opt/Signal-Desktop/dist/*.AppImage* /
+COPY --from=builder --chown=${ARTIFACT_UID}:${ARTIFACT_GID} \
+    /opt/Signal-Desktop/dist/*.blockmap /

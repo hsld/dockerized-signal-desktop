@@ -25,11 +25,29 @@ set -euo pipefail
 
 # ----------------------------- config ---------------------------------
 REPO_SLUG="signalapp/Signal-Desktop"
-IMAGE_BASENAME="${IMAGE_BASENAME:-signal-desktop-builder}"
-OUT_DIR="${OUT_DIR:-out}"              # override: OUT_DIR=/some/path ./build_signal-desktop.sh
-DOCKERFILE="${DOCKERFILE:-Dockerfile}" # override if needed
-NO_CACHE="${NO_CACHE:-1}"              # set to 0 to allow cache
-PROGRESS="${PROGRESS:-auto}"           # auto|plain
+IMAGE_BASENAME="${IMAGE_BASENAME:-signal-desktop-builder}" \
+    # kept for compatibility/logging
+OUT_DIR="${OUT_DIR:-out}" \
+    # override: OUT_DIR=/some/path ./build_signal-desktop.sh
+DOCKERFILE="${DOCKERFILE:-Dockerfile}" \
+    # override if needed
+NO_CACHE="${NO_CACHE:-1}" \
+    # set to 0 to allow cache
+PROGRESS="${PROGRESS:-auto}" \
+    # auto|plain
+
+# Optional: persist BuildKit cache across runs on this machine.
+# - If NO_CACHE=1, caching is disabled regardless.
+# - If NO_CACHE=0 and PERSIST_CACHE=0, BuildKit still caches *inside* the
+#   buildx builder container.
+# - If NO_CACHE=0 and PERSIST_CACHE=1, cache is also stored on disk
+#   (CACHE_DIR) so it's resilient to pruning.
+PERSIST_CACHE="${PERSIST_CACHE:-0}" # 0|1
+CACHE_DIR="${CACHE_DIR:-.buildx-cache}"
+
+# Optional: platform (usually leave empty for local artifact builds)
+# Examples: linux/amd64, linux/arm64
+PLATFORM="${PLATFORM:-}"
 
 # Signal build args you can override
 LINUX_TARGETS="${LINUX_TARGETS:-appImage}" # e.g. "appImage snap deb rpm"
@@ -52,15 +70,38 @@ need docker
 need curl
 need git
 
+# Ensure we have a buildx builder that supports the full BuildKit feature set.
+# The docker-container driver runs an isolated buildkit daemon, which unlocks:
+# - --output type=local
+# - cache export/import
+# - multi-platform (if you ever need it)
+ensure_builder() {
+    if ! docker buildx inspect sigd >/dev/null 2>&1; then
+        say "Creating buildx builder 'sigd' (docker-container)…"
+        docker buildx create --name sigd --driver docker-container --use \
+            >/dev/null
+    else
+        docker buildx use sigd >/dev/null
+    fi
+    docker buildx inspect --bootstrap >/dev/null
+}
+
 # Get whatever is currently latest (from API)
 latest_tag_from_api() {
     local tag=""
     if command -v jq >/dev/null 2>&1; then
-        tag="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases/latest" | jq -r .tag_name 2>/dev/null || true)"
+        tag="$(
+            curl -fsSL \
+                "https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
+                jq -r .tag_name 2>/dev/null || true
+        )"
     else
-        tag="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
-            grep -m1 -Eo '"tag_name"\s*:\s*"[^"]+"' |
-            sed -E 's/.*"tag_name"\s*:\s*"([^"]+)".*/\1/' || true)"
+        tag="$(
+            curl -fsSL \
+                "https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
+                grep -m1 -Eo '"tag_name"\s*:\s*"[^"]+"' |
+                sed -E 's/.*"tag_name"\s*:\s*"([^"]+)".*/\1/' || true
+        )"
     fi
     printf "%s" "${tag}"
 }
@@ -101,30 +142,6 @@ enable_buildkit() {
     export COMPOSE_DOCKER_CLI_BUILD=1
 }
 
-# Export artifacts to user filesystem
-copy_out() {
-    local cid="$1" dst="${OUT_DIR}"
-    say "Exporting artifacts…"
-    umask 022
-    rm -rf "${dst}"
-    mkdir -p "${dst}"
-    # Avoid preserving container UID/GID and strict perms
-    docker cp "${cid}:/out/." - |
-        tar --extract --no-same-owner --no-same-permissions --directory "${dst}"
-    echo ">> Done. Artifacts in: ${dst}"
-    ls -lh "${dst}" || true
-}
-
-#  Clean up after the build process finished
-clean_objects() {
-    local cid="$1" img="$2"
-    (
-        set +e
-        [[ -n "${cid}" ]] && docker rm -f "${cid}" >/dev/null 2>&1
-        [[ -n "${img}" ]] && docker rmi -f "${img}" >/dev/null 2>&1
-    )
-}
-
 #
 # The actual build process looks like this:
 #
@@ -132,12 +149,11 @@ clean_objects() {
 # 2. Announce target
 # 3. Enable build kit
 # 4. Validate docker file
-# 5. Prepare build args
-# 6. Build image
-# 7. Create container
-# 8. Set cleanup trap
-# 9. Extract artifacts
-# 10. Cleanup
+# 5. Ensure a buildx builder exists
+# 6. Prepare build args
+# 7. Build with buildx and export artifacts directly to the host filesystem
+# 8. Optionally persist cache
+# 9. List artifacts
 #
 main() {
     local want_ref
@@ -147,28 +163,70 @@ main() {
     enable_buildkit
     [[ -f "${DOCKERFILE}" ]] || die "Dockerfile not found at: ${DOCKERFILE}"
 
-    local build_args=(--pull --file "${DOCKERFILE}" --progress "${PROGRESS}"
+    ensure_builder
+
+    # Prepare host output directory for the BuildKit exporter.
+    # This replaces the old flow:
+    #   docker build -> docker create -> docker cp
+    # with:
+    #   docker buildx build --output type=local
+    say "Preparing output directory: ${OUT_DIR}"
+    umask 022
+    rm -rf "${OUT_DIR}"
+    mkdir -p "${OUT_DIR}"
+
+    # Prepare build args
+    local build_args=(
+        --builder sigd
+        --pull
+        --file "${DOCKERFILE}"
+        --progress "${PROGRESS}"
+
+        # We only want the artifact-exporting stage on the host.
+        --target exporter
+
+        # Export /out from the exporter stage to the host directory directly.
+        --output "type=local,dest=${OUT_DIR}"
+
         --build-arg "SIGNAL_REF=${want_ref}"
         --build-arg "LINUX_TARGETS=${LINUX_TARGETS}"
         --build-arg "PNPM_VERSION=${PNPM_VERSION}"
         --build-arg "ARTIFACT_UID=${ARTIFACT_UID}"
-        --build-arg "ARTIFACT_GID=${ARTIFACT_GID}")
+        --build-arg "ARTIFACT_GID=${ARTIFACT_GID}"
+    )
 
-    if [[ "${NO_CACHE}" == "1" ]]; then build_args+=(--no-cache); fi
+    # Optional: set platform explicitly (usually not needed for local builds)
+    if [[ -n "${PLATFORM}" ]]; then
+        build_args+=(--platform "${PLATFORM}")
+    fi
 
-    local image_tag="${IMAGE_BASENAME}:${want_ref}"
-    say "Docker build → ${image_tag}"
-    docker build "${build_args[@]}" -t "${image_tag}" .
+    # Cache behavior:
+    # - NO_CACHE=1 disables caching (slowest but cleanest)
+    # - NO_CACHE=0 uses BuildKit cache in the builder container (fast)
+    # - NO_CACHE=0 PERSIST_CACHE=1 also stores cache on disk at CACHE_DIR
+    if [[ "${NO_CACHE}" == "1" ]]; then
+        build_args+=(--no-cache)
+    else
+        if [[ "${PERSIST_CACHE}" == "1" ]]; then
+            mkdir -p "${CACHE_DIR}"
+            build_args+=(
+                --cache-from "type=local,src=${CACHE_DIR}"
+                --cache-to "type=local,dest=${CACHE_DIR}.tmp,mode=max"
+            )
+        fi
+    fi
 
-    say "Creating ephemeral container to copy artifacts…"
-    local cid
-    cid="$(docker create "${image_tag}")"
-    trap 'clean_objects "$cid" "$image_tag"' EXIT
-    copy_out "${cid}"
+    say "Docker buildx build → exporting artifacts to ${OUT_DIR}"
+    docker buildx build "${build_args[@]}" .
 
-    say "Removing the build image to keep Docker tidy…"
-    clean_objects "${cid}" "${image_tag}"
-    trap - EXIT
+    # If we exported cache, swap it into place atomically-ish
+    if [[ "${NO_CACHE}" != "1" && "${PERSIST_CACHE}" == "1" ]]; then
+        rm -rf "${CACHE_DIR}"
+        mv "${CACHE_DIR}.tmp" "${CACHE_DIR}"
+    fi
+
+    say ">> Done. Artifacts in: ${OUT_DIR}"
+    ls -lh "${OUT_DIR}" || true
 }
 
 main "$@"
